@@ -106,8 +106,9 @@ export interface ParsedSankeyData {
 /**
  * Takes data from a Grafana query and returns it in the format needed by d3-sankey.
  *
- * Contract: every column except the value field represents a Sankey "stage". By default the
- * value field is the last column; a specific field can be chosen via the `valueField` option.
+ * Contract: every column except the value field represents a Sankey "stage", in query order.
+ * By default the value field is the last column; a specific field can be chosen via the
+ * `valueField` option.
  *
  * @param data the data returned by the query
  * @param options the field options from the editor panel (only `valueField` is used here)
@@ -154,37 +155,45 @@ export function parseData(
 
   // Field.values is a plain array in modern Grafana (the old Vector abstraction was removed).
   const allData: Field[] = data.series[0].fields;
-  const numFields = allData.length - 1; // stage columns = every column except the last
+  const lastColIndex = allData.length - 1;
 
-  // Header labels are the display name of every field (last one is the value label).
-  const displayNames: string[] = allData.map((field) => getFieldDisplayName(field));
+  // Resolve the value field, in priority order:
+  //   1. the explicitly selected field;
+  //   2. the LAST column, when it is numeric — this panel's contract is "value is the last
+  //      column", so it must win over any earlier numeric column. Preferring "first numeric"
+  //      here silently stole the value field whenever a numeric DIMENSION (e.g. a port or a
+  //      status code) preceded the real value column, making link thickness the port number;
+  //   3. the first numeric field — covers a value column that is genuinely not last (e.g. a
+  //      transform reordered the columns and the last column is a string);
+  //   4. the last column regardless of type — some datasources (e.g. OpenSearch/Elasticsearch)
+  //      return the Count field UNTYPED, so tiers 2 and 3 find nothing. Without this fallback
+  //      `valueField[0]` would be undefined and `formatDisplay`/`.display` would throw (which
+  //      surfaced as "TypeError: p is not a function").
+  const pick = (predicate: (fields: any[]) => any) => data.series.map((series: { fields: any[] }) => predicate(series.fields));
 
-  // Resolve the value field: selected field → first numeric field → last column.
-  // The last-column fallback is important: some datasources (e.g. OpenSearch/Elasticsearch)
-  // return the Count field UNTYPED, so `type === 'number'` finds nothing. Without this fallback
-  // `valueField[0]` would be undefined and `formatDisplay`/`.display` would throw (which surfaced
-  // as "TypeError: p is not a function"). The last column is the value field by this panel's
-  // contract, and it also avoids accidentally picking a numeric dimension (e.g. a port).
-  let valueField = data.series.map((series: { fields: any[] }) =>
-    series.fields.find((field: { name: any }) => field.name === options.valueField)
-  );
+  let valueField = pick((fields) => fields.find((field: { name: any }) => field.name === options.valueField));
   if (!valueField[0]) {
-    valueField = data.series.map((series: { fields: any[] }) =>
-      series.fields.find((field: { type: string }) => field.type === 'number')
-    );
+    valueField = pick((fields) => (fields[fields.length - 1]?.type === 'number' ? fields[fields.length - 1] : undefined));
   }
   if (!valueField[0]) {
-    valueField = data.series.map((series: { fields: any[] }) => series.fields[series.fields.length - 1]);
+    valueField = pick((fields) => fields.find((field: { type: string }) => field.type === 'number'));
+  }
+  if (!valueField[0]) {
+    valueField = pick((fields) => fields[fields.length - 1]);
   }
 
   // Column index of the resolved value field. Using this (rather than a hardcoded last-column
-  // index) keeps the numeric `value` and its formatted `displayValue` sourced from the SAME
-  // field. For the default case (value field IS the last column) this equals `numFields`, so
-  // output is unchanged; it only corrects the case where a non-last field is selected as the
-  // value. (The stage-column loop below still assumes the value is the last column — that
-  // remains a known limitation, documented in refactor_notes.md.)
+  // index) keeps the numeric `value` and its formatted `displayValue` sourced from the SAME field.
   const valueFieldIndex = allData.findIndex((f) => f === valueField[0]);
-  const valueColIndex = valueFieldIndex >= 0 ? valueFieldIndex : numFields;
+  const valueColIndex = valueFieldIndex >= 0 ? valueFieldIndex : lastColIndex;
+
+  // Stage columns are every column EXCEPT the value column, in query order. Deriving this from
+  // `valueColIndex` (rather than assuming "all but the last") is what stops a non-last value
+  // column from also being rendered as a stage.
+  const stageIndices = allData.map((_, i) => i).filter((i) => i !== valueColIndex);
+
+  // Header labels: one per stage column. The value column is not a stage, so it has no header.
+  const displayNames: string[] = stageIndices.map((i) => getFieldDisplayName(allData[i]));
 
   const frame = new DataFrameView(data.series[0]);
 
@@ -250,7 +259,6 @@ export function parseData(
     // Edge-list mode: the first two non-value columns are source and target. Nodes are keyed by
     // name only, so a node that is a target in one row and a source in another is the SAME node,
     // letting d3-sankey compute a multilevel graph.
-    const stageIndices = allData.map((_, i) => i).filter((i) => i !== valueColIndex);
     const sourceIdx = stageIndices[0];
     const targetIdx = stageIndices[1];
 
@@ -283,10 +291,10 @@ export function parseData(
       rowId++;
     });
   } else {
-    // Columns mode: each column is a level; each row is a full path across the stage columns.
+    // Columns mode: each stage column is a level; each row is a full path across the stage columns.
     frame.forEach((row: any) => {
       const currentLink: number[] = [];
-      for (let i = 0; i < numFields; i++) {
+      for (const i of stageIndices) {
         const raw = row[i];
         // Skip empty/NULL cells. Variable-depth paths pad their unused levels with NULL; without
         // this each NULL would become a bogus "null" node that the path routes through. Skipping

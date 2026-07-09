@@ -121,32 +121,12 @@ contained a space (invalid). Positions, `14pt` font, weight `500`, anchors, and 
 
 ## Known limitations / future work (not changed)
 
-- **Value must be the last column.** The node-stage loop treats "every column except the last"
-  as a Sankey stage. Choosing a non-last field as the value field is only partially supported
-  (value/display are now consistent, but the last column would still be drawn as a stage). A
-  full fix would rework the stage/value separation.
-- **Grafana version mismatch.** `@grafana/data`/`@grafana/ui` are pinned to `8.0.6` while
-  `@grafana/runtime`/`@grafana/e2e` are `9.3.8`, and `Vector` (imported in `dataParser.ts`) is
-  deprecated in Grafana 9+. Aligning these is a dependency change left out of scope.
-- **Two color systems.** The standard by-value Color field config coexists with the custom
-  monochrome/palette coloring; only the latter is used. Worth consolidating later.
-- **No real tests.** Only a stub test exists (`module.test.ts`). Unit tests for `parseData`
-  (node/link construction, color cycling, value resolution) are the recommended next step.
-- **Pervasive `any`.** Types were tightened at the parser boundary and via new interfaces, but
-  component props are still largely `any`; a fuller strict-typing pass remains.
+- ~~**Value must be the last column.**~~ *(Fixed later — see "Stage/value separation" below.)* The
+  node-stage loop treated "every column except the last" as a Sankey stage, so choosing a non-last
+  field as the value field was only partially supported.
 
 ---
 
-## Verification performed
-
-- `tsc --noEmit` (typecheck) and `eslint` (lint) — see the session log for results.
-- Behavior review: the highlight opacity constants (0.7 / 1 / 0.4 / 0.2), header geometry/fonts,
-  and color palette values were diff-checked to be byte-for-byte identical to the originals.
-- Recommended manual check in a Grafana dev instance (`docker-compose.yaml`): load 2-column and
-  3+-column datasets and confirm nodes/links/headers render as before, right-column labels now
-  sit to the left of their nodes, and link/node hover dims + tooltips behave as described above.
-
----
 
 # Feature updates (post-refactor)
 
@@ -304,18 +284,308 @@ failures render the empty-panel fallback). This change makes the diagram actuall
 - **`parseData`** returns an empty result up front when there are no series/fields (instead of
   dereferencing `data.series[0].fields`).
 
-### Grafana 11.6 vs the Grafana 13 build
-The plugin is built against `@grafana/*` 13 (`grafanaDependency >=11.0.0`). Every symbol it imports
-exists in 11.6, so it loads and renders there. One caveat: `DataLinksContextMenu`'s child API
-differs (11.6 has no `triggerProps`), so data-link clicks may not activate on 11.6 — they degrade
-without crashing. Building a separate 11.x-targeted artifact (or feature-detecting the API) is
-future work if first-class 11.x data-link support is required.
+
+
+## 10. Stage/value separation + value-field resolution (bug fix) — `dataParser.ts`, `Headers.tsx`
+
+Found while building the manual-test datasets below. Two coupled defects meant a **numeric dimension
+column silently became the value field**:
+
+- **Resolution order.** Value-field resolution was *selected → first numeric → last column*. On a
+  realistic `src, port, dst, bytes` query the first numeric field is `port`, so link thickness was
+  the port number (`443`, `80`), `bytes` was ignored entirely, and the tooltip read
+  `A -> 443 -> X`. Nothing errored — the diagram was just quietly wrong.
+- **Stage columns.** Columns mode hardcoded stages as "every column except the **last**", while the
+  value could resolve to a different column. A non-last value column was therefore drawn as a stage
+  *and* used as the value, and the last column was silently dropped from the diagram.
+
+Fixed as follows:
+
+- Resolution is now a 4-tier ladder: **selected field → last column if numeric → first numeric field
+  → last column regardless of type.** Promoting "last column if numeric" above "first numeric"
+  enforces the panel's documented contract and fixes the numeric-dimension case, while the final
+  untyped fallback preserves the OpenSearch/Elasticsearch untyped-`Count` fix from item 9.
+- Stage columns are derived as **every index except `valueColIndex`**, in query order (the same rule
+  edge-list mode already used), so the value column is never drawn as a stage and a genuinely
+  non-last value column works.
+- `displayNames` now contains **one header per stage column** instead of every field name with the
+  value label tacked on the end. `Headers.tsx` was updated accordingly (right label is now the last
+  entry, not `length - 2`), and it no longer renders a duplicate label when there is a single stage.
+  Middle-label positions are unchanged.
+
+*Intended output change: queries with a numeric dimension before the value column now use the correct
+value column (thickness and tooltips change, and the previously-dropped last column appears as a
+stage). Queries that already followed the "value is the last column" contract render identically.*
+
+## 11. Tooltip appeared far from the cursor (bug fix) — `Tooltip.tsx`
+
+Reported after the Grafana 13 upgrade: hovering a flow showed the tooltip a long way from the mouse,
+and the further the panel sat from the top-left of the screen, the further off it was.
+
+`VizTooltipContainer` positions itself with `position: fixed` + `transform: translate(x, y)`, and we
+pass viewport coordinates (`clientX`/`clientY`) — correct in isolation. But a `fixed` element is
+positioned relative to its nearest ancestor with a `transform` / `filter` / `will-change`, not the
+viewport, and Grafana's dashboard grid puts a transform on every panel wrapper. Rendered inline
+inside the panel, the tooltip was therefore offset by the panel's own screen position.
+
+`Tooltip.tsx` now wraps the container in `@grafana/ui`'s `<Portal>`, which renders into Grafana's
+body-level overlay container and escapes the transformed containing block — the same thing Grafana's
+own viz tooltips do. (The component's doc comment already *claimed* it was "positioned via a portal";
+it never was.) A regression test asserts the tooltip is portalled and receives the cursor position.
 
 ## Still not changed
 
-- The "value field must be the last column" contract remains for columns mode (stage columns are
-  still "every column except the last"). Reordering columns via a transform can still misidentify
-  the value column; making stage/value separation fully index-based is future work.
-- No explicit per-series color override option was added (deterministic-by-name was chosen).
+- No explicit per-series color override option was added (deterministic-by-name was chosen), but
+  **Color links by value mappings** gives per-value control — see "Changing flow colors" below.
 - Cyclic edge-list data renders empty rather than a laid-out partial graph; breaking cycles is
   future work.
+
+---
+
+# How to run the tests
+
+> **Package manager.** The project pins `yarn@1.22.10` (`packageManager` in `package.json`, and the
+> lockfile is `yarn.lock`). If `yarn` is not on your PATH, prefix the commands with `npx yarn@1.22.10`
+> or substitute `npm run <script>` — every script below works either way. Install dependencies with
+> yarn, though, so `yarn.lock` stays authoritative.
+
+## Unit tests (Jest)
+
+No Grafana instance required — the suite runs entirely in `jsdom`.
+
+```bash
+yarn install       # once
+yarn test          # watch mode, only changed files
+yarn test:ci       # single run, what CI executes
+```
+
+Specs live in `tests/unit/` and import from `../../src`. Useful variations:
+
+```bash
+yarn test:ci -- tests/unit/dataParser.test.ts     # one file
+yarn test:ci -- -t "fixColor"                     # tests matching a name
+```
+
+Related checks, both of which must also pass:
+
+```bash
+yarn typecheck     # tsc --noEmit
+yarn lint          # eslint (yarn lint:fix to autofix)
+```
+
+## End-to-end tests (Playwright + `@grafana/plugin-e2e`)
+
+The e2e suite drives a **real, already-running Grafana** that has this plugin loaded. There is no
+Docker step and no datasource setup: `tests/e2e/sankey.spec.ts` mocks the `/api/ds/query` response
+with fixed `source,target,value` frames via `mockQueryDataResponse`, so the diagram gets
+deterministic data no matter which datasource is selected.
+
+**One-time setup** — build the plugin and expose `dist/` to Grafana as the plugin id
+`netsage-sankey-panel`, then allow it to load unsigned:
+
+```bash
+yarn build
+
+# Symlink dist/ into Grafana's plugin directory (Homebrew path shown):
+ln -s "$(pwd)/dist" /opt/homebrew/var/lib/grafana/plugins/netsage-sankey-panel
+```
+
+In `/opt/homebrew/etc/grafana/grafana.ini`, under `[plugins]`:
+
+```ini
+allow_loading_unsigned_plugins = netsage-sankey-panel
+```
+
+Restart Grafana so it picks up the plugin (`brew services restart grafana`), and confirm it is
+listed under *Administration → Plugins*.
+
+**Running:**
+
+```bash
+yarn e2e           # headless
+yarn e2e:ui        # Playwright UI mode, good for debugging
+npx playwright show-report   # open the HTML report from the last local run
+```
+
+Configuration comes from `playwright.config.ts` and these environment variables:
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `GRAFANA_URL` | `http://localhost:3000` | Grafana base URL |
+| `GRAFANA_USER` | `admin` | login user |
+| `GRAFANA_PASSWORD` | `admin` | login password |
+
+The `auth` project logs in once and stores the session in `playwright/.auth/admin.json`, which the
+`run-tests` project reuses. Tests run serially (`workers: 1`) with one retry locally, because they
+share a single live Grafana instance.
+
+**Note:** after changing any source file you must re-run `yarn build` before `yarn e2e` — the tests
+exercise the built `dist/` that Grafana loaded, not `src/`. `yarn dev` (watch build) plus a Grafana
+running with `app_mode = development` is the faster inner loop.
+
+---
+
+# Sample datasets for manual testing
+
+Each dataset below is meant to be pasted into Grafana directly: add a **TestData** datasource panel,
+set **Scenario → CSV Content**, and paste the block. Then set the visualization to **Sankey Panel**.
+
+Remember the panel's core contract: **the last column is the value (link thickness); every other
+column is a stage.** Unless noted, leave the panel options at their defaults.
+
+## 1. Basic columns mode (baseline)
+
+Three stages and a value. Exercises headers, node labels, link colors, and both tooltips.
+
+```csv
+source,middle,dest,bytes
+Chicago,Denver,Seattle,120
+Chicago,Denver,Portland,80
+Chicago,Dallas,Seattle,45
+Boston,Dallas,Portland,60
+Boston,Denver,Seattle,30
+```
+
+Expect: 3 column headers (`source`, `middle`, `dest`); flows colored by their first-column series
+(`Boston`, `Chicago`); hovering a flow shows `Chicago -> Denver -> Seattle` and a bold `120`;
+hovering a node shows `name: value`.
+
+## 2. Edge list (multilevel graph)
+
+Set **Link mode → Edge list (source → target)**. Nodes are keyed by name, so `B` is one node even
+though it is a target in one row and a source in another — d3-sankey computes the levels.
+
+```csv
+source,target,value
+A,B,10
+A,C,5
+B,D,6
+C,D,4
+B,E,4
+D,F,10
+```
+
+Expect: a 4-level graph `A → {B,C} → D/E → F`, **no column headers** (suppressed in edge-list mode),
+and flows colored by their source node.
+
+## 3. Variable-depth paths (NULL skipping)
+
+Blank cells are skipped rather than becoming bogus `null` nodes, so shorter paths link straight
+through to the next real node.
+
+```csv
+tier1,tier2,tier3,count
+Web,App,DB,50
+Web,,DB,20
+Cache,,DB,15
+Web,App,,10
+```
+
+Expect: row 2 renders as `Web -> DB` (not `Web -> null -> DB`), row 4 as `Web -> App`. Confirm via
+the flow tooltips. No node is ever labeled `null`.
+
+## 4. Deterministic coloring (row order independence)
+
+The same data as dataset 1 with the rows shuffled. Colors are assigned by **sorted distinct
+first-column name**, not encounter order.
+
+```csv
+source,middle,dest,bytes
+Boston,Dallas,Portland,60
+Chicago,Dallas,Seattle,45
+Boston,Denver,Seattle,30
+Chicago,Denver,Seattle,120
+Chicago,Denver,Portland,80
+```
+
+Expect: `Boston` and `Chicago` keep the **same colors as in dataset 1** despite the different row
+order. To test the **Custom color palette** option, set it to `red, #00DB57, dark-purple` (hex, CSS
+names, and Grafana color tokens all work) and confirm the flows recolor in sorted-name order.
+
+## 5. Value formatting and units (tooltips)
+
+Add a field override on `bytes`: **Standard options → Unit → bytes(SI)**.
+
+```csv
+service,region,bytes
+api,us-east,1500000
+api,eu-west,900000
+web,us-east,2300000
+web,eu-west,450000
+```
+
+Expect: tooltips show `1.5 MB` rather than `1500000`, because both the numeric value and the
+formatted `displayValue` come from the resolved value field's display processor.
+
+## 6. Value mappings on labels and colors
+
+Add **Value mappings** on the `code` field: `1 → Success` (green), `2 → Retry` (yellow),
+`3 → Failure` (red).
+
+```csv
+code,stage,count
+1,Delivered,300
+2,Delivered,40
+3,Dropped,25
+1,Dropped,10
+```
+
+Expect: node labels read `Success` / `Retry` / `Failure`, not `1` / `2` / `3` — each column is run
+through **its own** display processor. Then enable **Color links by value mappings** and confirm each
+flow takes its source value's mapped color (green / yellow / red), overriding the palette.
+
+## 7. Node ordering
+
+```csv
+stage,dest,value
+Zulu,Out,10
+Alpha,Out,20
+Mike,Out,15
+```
+
+With **Node ordering → Query order** (default) the left column reads `Zulu, Alpha, Mike` top-to-bottom
+(row order), and adding a **Sort by** transform on `stage` reorders the diagram. Switch to
+**Automatic** and d3-sankey chooses the vertical order instead, ignoring the transform.
+
+## 8. Cyclic edge list (graceful failure)
+
+Set **Link mode → Edge list**. `A → B → C → A` is a cycle, which d3-sankey rejects by throwing.
+
+```csv
+source,target,value
+A,B,10
+B,C,5
+C,A,3
+X,X,7
+```
+
+Expect: an **empty panel, not a crash** — the layout call is wrapped in try/catch and logs
+`Sankey layout error (possibly cyclic data)` to the browser console. The `X,X` self-loop row is
+skipped before layout. Remove the `C,A` row and the diagram renders `A → B → C` plus nothing for `X`.
+
+## 9. Numeric dimension column (regression test for the stage/value fix)
+
+A numeric **dimension** (`port`) sits before the real value column. This used to break: `port` was
+picked as the value field, so thickness was `443`/`80` and `bytes` was ignored. See feature update
+10.
+
+```csv
+src,port,dst,bytes
+A,443,X,100
+B,80,Y,200
+```
+
+Expect: headers `src`, `port`, `dst`; **`bytes` is the value** (thickness `100`/`200`); the flow
+tooltip reads `A -> 443 -> X` with a bold `100`. `port` is a stage, not the value.
+
+For the non-last-value case, set **Value Field → port** explicitly: `port` then leaves the stages and
+`src`, `dst`, `bytes` become the three stage columns.
+
+## 10. Empty and degenerate input
+
+```csv
+source,target,value
+```
+
+A header-only CSV (no rows), and likewise a panel with no query at all, should render the empty
+`<svg>` fallback with no console errors and no orphan tooltip left in the DOM.

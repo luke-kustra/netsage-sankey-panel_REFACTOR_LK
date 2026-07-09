@@ -1,7 +1,7 @@
 import React from 'react';
 import { PanelProps } from '@grafana/data';
-import { SankeyOptions } from 'types';
-import { parseData, fixColor } from 'dataParser';
+import { SankeyOptions } from './types';
+import { parseData, fixColor } from './dataParser';
 import { Sankey } from './components/Sankey';
 import { useTheme2 } from '@grafana/ui';
 

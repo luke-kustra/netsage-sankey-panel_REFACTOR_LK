@@ -1,6 +1,7 @@
 import React from 'react';
 
 interface HeaderProps {
+  /** One label per STAGE column, in query order (the value column has no header). */
   displayNames: string[];
   /** Graph (plot) width, used to position the right label and space the middle ones. */
   width: number;
@@ -46,25 +47,28 @@ export const Headers: React.FC<HeaderProps> = ({ displayNames, width, topMargin,
     </text>
   );
 
-  // Right axis label = last stage column (the very last field is the value label, so use -2).
-  labels.push(
-    <text
-      key="header-right"
-      x={width + leftMargin}
-      y={translateY}
-      fontSize={FONT_SIZE}
-      fontWeight={FONT_WEIGHT}
-      textAnchor="end"
-      fill={textColor}
-    >
-      {displayNames[displayNames.length - 2]}
-    </text>
-  );
+  // Right axis label = last stage column. Skipped when there is only one stage, which would
+  // otherwise draw the same label twice at the same y.
+  if (displayNames.length > 1) {
+    labels.push(
+      <text
+        key="header-right"
+        x={width + leftMargin}
+        y={translateY}
+        fontSize={FONT_SIZE}
+        fontWeight={FONT_WEIGHT}
+        textAnchor="end"
+        fill={textColor}
+      >
+        {displayNames[displayNames.length - 1]}
+      </text>
+    );
+  }
 
   // Evenly spaced labels for any intermediate columns.
-  if (displayNames.length > 3) {
-    const colWidth = width / (displayNames.length - 2);
-    for (let i = 1; i < displayNames.length - 2; i++) {
+  if (displayNames.length > 2) {
+    const colWidth = width / (displayNames.length - 1);
+    for (let i = 1; i < displayNames.length - 1; i++) {
       const translateX = colWidth * i + leftMargin;
       labels.push(
         <text
