@@ -1,4 +1,12 @@
-import { DataFrameView, Field, getFieldDisplayName, LinkModel } from '@grafana/data';
+import {
+  createTheme,
+  DataFrameView,
+  Field,
+  getDisplayProcessor,
+  getFieldDisplayName,
+  GrafanaTheme2,
+  LinkModel,
+} from '@grafana/data';
 
 /**
  * Maps Grafana's named color tokens (as emitted by the color picker, e.g. "dark-green")
@@ -70,6 +78,42 @@ export function formatDisplay(
   return formatted.suffix ? `${formatted.text} ${formatted.suffix}` : `${formatted.text}`;
 }
 
+/**
+ * A colour no sane dashboard uses, injected as the field's `fixed` colour so that ANY other colour
+ * coming back from the display processor must have been supplied by a value mapping.
+ */
+const SENTINEL_COLOR = '#000001';
+
+/**
+ * Returns the colour a value mapping assigns to `value`, or `undefined` when no mapping supplies
+ * one (no mappings configured, no mapping matched, or the matching mapping only sets display text).
+ *
+ * Why not just read `field.display(value).color`? Because it never returns undefined: with no
+ * mapping it falls through to the field's threshold / fixed colour (green `#73BF69` by default).
+ * Using it directly made every unmapped series collapse to one flat colour, which is why the
+ * documented "fall back to the palette" branch was unreachable.
+ *
+ * Rather than reimplement Grafana's mapping semantics (value / range / regex / special, and their
+ * precedence), this builds a processor over the same field config with the colour mode forced to a
+ * fixed sentinel. Mapping colours still win over that fixed colour, so a result other than the
+ * sentinel is exactly "a value mapping supplied this colour". Note this deliberately ignores
+ * threshold and field colours — the option is *Color links by value mappings*.
+ */
+function makeMappingColorResolver(field: Field, theme: GrafanaTheme2): (value: any) => string | undefined {
+  if (!field?.config?.mappings?.length) {
+    // Nothing configured: skip building a processor at all, so every value falls back to the palette.
+    return () => undefined;
+  }
+  const display = getDisplayProcessor({
+    field: { ...field, config: { ...field.config, color: { mode: 'fixed', fixedColor: SENTINEL_COLOR } } },
+    theme,
+  });
+  return (value: any) => {
+    const color = display(value).color;
+    return color === undefined || color === SENTINEL_COLOR ? undefined : color;
+  };
+}
+
 /** A single Sankey node (one distinct value within one column). */
 export interface SankeyNode {
   name: any;
@@ -117,7 +161,9 @@ export interface ParsedSankeyData {
  * @param linkMode 'columns' (each column is a level, each row a full path) or 'edgeList'
  *   (first two non-value columns are source→target and nodes connect by name)
  * @param palette custom comma-separated multi-color palette (empty = built-in default)
- * @param colorByValueMappings color flows by the source value's value-mapping / field color
+ * @param colorByValueMappings color flows by the value mapping set on the source value; values
+ *   without a mapped color keep their palette color
+ * @param theme the active Grafana theme, used to resolve mapping color names
  * @return {@link ParsedSankeyData} the nodes/links plus header + tooltip metadata
  */
 export function parseData(
@@ -127,7 +173,8 @@ export function parseData(
   color: any,
   linkMode: 'columns' | 'edgeList' = 'columns',
   palette = '',
-  colorByValueMappings = false
+  colorByValueMappings = false,
+  theme: GrafanaTheme2 = createTheme()
 ): ParsedSankeyData {
   // Build the multi-color palette. A non-empty custom `palette` (comma-separated hex / CSS /
   // Grafana color tokens) overrides the built-in default; monochrome uses the single chosen color.
@@ -235,10 +282,21 @@ export function parseData(
     return models;
   };
 
-  // Grafana's computed color for a value (value mappings > thresholds > field color config).
-  // Only resolved when coloring by value mappings; otherwise undefined (no overhead).
-  const getMappedColor = (field: any, raw: any): string | undefined =>
-    colorByValueMappings && field && typeof field.display === 'function' ? field.display(raw).color : undefined;
+  // The value-mapping color for a value, or undefined when no mapping supplies one (in which case
+  // the link keeps its palette color). Resolvers are built lazily, once per field, and only when
+  // coloring by value mappings — otherwise there is no overhead at all.
+  const mappingColorResolvers = new Map<number, (value: any) => string | undefined>();
+  const getMappedColor = (fieldIndex: number, raw: any): string | undefined => {
+    if (!colorByValueMappings) {
+      return undefined;
+    }
+    let resolve = mappingColorResolvers.get(fieldIndex);
+    if (!resolve) {
+      resolve = makeMappingColorResolver(allData[fieldIndex], theme);
+      mappingColorResolvers.set(fieldIndex, resolve);
+    }
+    return resolve(raw);
+  };
 
   // Find or create a node for the given key, recording that the current row passes through it
   // (used by node tooltips to highlight incident links). Returns the node's index.
@@ -272,8 +330,8 @@ export function parseData(
         // rejects circular links, and a node cannot flow to itself.
         const validEndpoints = sName != null && sName !== '' && tName != null && tName !== '';
         if (validEndpoints && sName !== tName) {
-          const sIndex = getOrCreateNode(sName, `${sName}`, 0, rowId, getMappedColor(allData[sourceIdx], row[sourceIdx]));
-          const tIndex = getOrCreateNode(tName, `${tName}`, 0, rowId, getMappedColor(allData[targetIdx], row[targetIdx]));
+          const sIndex = getOrCreateNode(sName, `${sName}`, 0, rowId, getMappedColor(sourceIdx, row[sourceIdx]));
+          const tIndex = getOrCreateNode(tName, `${tName}`, 0, rowId, getMappedColor(targetIdx, row[targetIdx]));
           const rowValue = row[valueColIndex];
           pluginDataLinks.push({
             source: sIndex,
@@ -304,7 +362,7 @@ export function parseData(
         }
         const node = displayCell(allData[i], raw);
         // colId is numeric, so the first space unambiguously separates it from the node name.
-        const index = getOrCreateNode(node, `${i} ${node}`, i, rowId, getMappedColor(allData[i], raw));
+        const index = getOrCreateNode(node, `${i} ${node}`, i, rowId, getMappedColor(i, raw));
         currentLink.push(index);
       }
 

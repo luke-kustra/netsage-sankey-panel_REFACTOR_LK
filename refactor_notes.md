@@ -333,6 +333,45 @@ body-level overlay container and escapes the transformed containing block — th
 own viz tooltips do. (The component's doc comment already *claimed* it was "positioned via a portal";
 it never was.) A regression test asserts the tooltip is portalled and receives the cursor position.
 
+## 12. "Color links by value mappings" collapsed every unmapped series to one color (bug fix)
+
+The option read the source value's color straight off Grafana's display processor:
+
+```ts
+link.color = colorByValueMappings && origin.mappedColor ? origin.mappedColor : paletteColor;
+// mappedColor = field.display(value).color
+```
+
+`field.display(value).color` **never returns undefined** — with no value mapping it falls through to
+the field's threshold / fixed color (`#73BF69` green under the default thresholds mode, `#808080`
+with no color config). So the `paletteColor` fallback was unreachable, and enabling the option
+turned every unmapped source one flat color, destroying series differentiation. To use the feature
+you had to hand-map every value.
+
+`mappedColor` is now resolved by `makeMappingColorResolver`, which returns a color **only when a
+value mapping supplies one**, and `undefined` otherwise, making the palette fallback real.
+
+Rather than reimplement Grafana's mapping semantics (value / range / regex / special maps and their
+precedence), it builds a display processor over the same field config with the color mode forced to
+a fixed sentinel (`#000001`). Mapping colors still win over a fixed color, so any result other than
+the sentinel is exactly "a value mapping supplied this color". `getValueMappingResult` would have
+been the direct API, but it is not re-exported from `@grafana/data`'s root (verified at runtime), and
+deep-importing `dist/` is fragile across Grafana versions. Resolvers are built lazily, once per
+field, and only when the option is enabled.
+
+This deliberately **ignores thresholds and field color config** — the option is *Color links by value
+mappings*, and its description no longer claims otherwise. `parseData` gained a trailing `theme`
+parameter (defaulting to `createTheme()`), which `SankeyPanel` supplies from `useTheme2()`.
+
+*Output change only when the option is enabled (it is off by default): unmapped sources now keep
+their palette color instead of going flat grey/green. With the option off, output is byte-identical
+— verified by diffing link colors, values, headers and row labels against the previous
+implementation.*
+
+The old unit test for this path stubbed `display` to return `color: undefined` for unmapped values —
+something Grafana never does — so it passed while the branch it "covered" was dead in production. It
+has been replaced with tests that drive the **real** `getDisplayProcessor` with real mappings.
+
 ## Still not changed
 
 - No explicit per-series color override option was added (deterministic-by-name was chosen), but

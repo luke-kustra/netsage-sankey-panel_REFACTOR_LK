@@ -27,7 +27,8 @@ export const SankeyPanel: React.FC<Props> = ({ options, data, width, height, id 
       options.color,
       options.linkMode,
       options.palette,
-      options.colorByValueMappings
+      options.colorByValueMappings,
+      theme
     );
   } catch (error) {
     console.error('parsing error: ', error);

@@ -16,8 +16,8 @@ export const plugin = new PanelPlugin<SankeyOptions>(SankeyPanel)
         path: 'colorByValueMappings',
         name: 'Color links by value mappings',
         description:
-          'Color each flow using the value-mapping / threshold / field color of its source ' +
-          '(first column) value. Overrides the single/palette colors below when a color is resolved.',
+          'Color each flow using the value mapping set on its source (first column) value. ' +
+          'Values without a mapped color keep their palette color.',
         defaultValue: false,
       })
       .addBooleanSwitch({

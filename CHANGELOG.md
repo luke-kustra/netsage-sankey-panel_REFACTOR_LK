@@ -21,6 +21,11 @@ Refactor of the panel internals, plus bug fixes and new options. See `refactor_n
 - **Value mappings** now apply to node labels.
 - **Cyclic edge-list data** renders an empty panel instead of crashing.
 - Fixed `TypeError: p is not a function` with untyped value fields (e.g. OpenSearch `Count`).
+- **`Color links by value mappings` collapsed every unmapped series to one flat color.** It read the
+  source value's color from the display processor, which always resolves to the field's threshold or
+  fixed color when no mapping matches, so the documented palette fallback never ran. Values without
+  a mapped color now keep their palette color. The option colors by value mappings only; thresholds
+  and field color config are no longer consulted.
 
 ### Features
 

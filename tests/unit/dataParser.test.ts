@@ -1,4 +1,15 @@
-import { DataFrame, FieldType, LinkModel, toDataFrame } from '@grafana/data';
+import {
+  createTheme,
+  DataFrame,
+  FieldConfig,
+  FieldType,
+  getDisplayProcessor,
+  LinkModel,
+  MappingType,
+  ThresholdsMode,
+  toDataFrame,
+  ValueMapping,
+} from '@grafana/data';
 import { fixColor, formatDisplay, parseData } from '../../src/dataParser';
 
 /**
@@ -11,6 +22,8 @@ interface FieldSpec {
   name: string;
   values: any[];
   type?: FieldType;
+  /** Real Grafana field config (mappings, thresholds, color mode) — used by the value-mapping tests. */
+  config?: FieldConfig;
   display?: (v: any) => { text: string; suffix?: string; color?: string };
   getLinks?: (opts: { valueRowIndex?: number }) => LinkModel[];
 }
@@ -21,12 +34,16 @@ function makeFrame(fields: FieldSpec[]): DataFrame {
       name: f.name,
       type: f.type ?? FieldType.string,
       values: f.values,
-      config: {},
+      config: f.config ?? {},
     })),
   });
   fields.forEach((f, i) => {
     if (f.display) {
       df.fields[i].display = f.display as any;
+    } else if (f.config) {
+      // Attach a REAL display processor, as Grafana's applyFieldOverrides does, so value mappings
+      // reach node labels and colors exactly the way they do at runtime.
+      df.fields[i].display = getDisplayProcessor({ field: df.fields[i], theme: createTheme() });
     }
     if (f.getLinks) {
       (df.fields[i] as any).getLinks = f.getLinks;
@@ -263,17 +280,77 @@ describe('parseData — deterministic coloring', () => {
     expect([...colors.values()].every((c) => ['#111111', '#222222'].includes(c))).toBe(true);
   });
 
-  it('colors by value mappings when enabled, falling back to palette when unresolved', () => {
-    const frame = makeFrame([
-      { name: 'src', values: ['A', 'B'], display: (v) => ({ text: String(v), color: v === 'A' ? '#ff0000' : undefined }) },
+});
+
+/**
+ * These exercise the REAL Grafana display processor rather than a stub. That matters: an earlier
+ * version of this suite stubbed `display` to return `color: undefined` for unmapped values, which
+ * Grafana never does — it always falls through to the field's threshold/fixed color. The stub made
+ * the palette-fallback branch look reachable when in production it was dead, and every unmapped
+ * series silently collapsed to one flat color.
+ */
+describe('parseData — coloring by value mappings', () => {
+  const theme = createTheme();
+  const PALETTE = ['#111111', '#222222'];
+
+  // A frame whose `src` column carries real field config (mappings), the way Grafana supplies it.
+  const frameWithSrcConfig = (config: FieldSpec['config']) =>
+    makeFrame([
+      { name: 'src', values: ['A', 'B'], config },
       { name: 'dst', values: ['X', 'Y'] },
       { name: 'val', type: FieldType.number, values: [1, 2] },
     ]);
-    const result = parse(frame, { valueField: 'val' }, false, 'blue', 'columns', '', true);
-    const colors = colorByOrigin(result);
-    expect(colors.get('A')).toBe('#ff0000'); // resolved mapped color
-    expect(colors.get('B')).not.toBe('#ff0000'); // fell back to a palette color
-    expect(colors.get('B')).toBeTruthy();
+
+  const colorsWithMappings = (config: FieldSpec['config']) =>
+    colorByOrigin(
+      parse(frameWithSrcConfig(config), { valueField: 'val' }, false, 'blue', 'columns', PALETTE.join(','), true, theme)
+    );
+
+  const mapAToRed: ValueMapping[] = [{ type: MappingType.ValueToText, options: { A: { color: 'red', index: 0 } } }];
+
+  it('uses the mapped color for a mapped value', () => {
+    const colors = colorsWithMappings({ mappings: mapAToRed });
+    expect(colors.get('A')).toBe(theme.visualization.getColorByName('red'));
+  });
+
+  it('keeps the PALETTE color for a value with no mapping (regression: used to go flat grey/green)', () => {
+    const colors = colorsWithMappings({ mappings: mapAToRed });
+    expect(PALETTE).toContain(colors.get('B'));
+  });
+
+  it('keeps palette colors when a mapping sets only display text, not a color', () => {
+    const textOnly: ValueMapping[] = [{ type: MappingType.ValueToText, options: { A: { text: 'Alpha', index: 0 } } }];
+    const colors = colorByOrigin(
+      parse(frameWithSrcConfig({ mappings: textOnly }), { valueField: 'val' }, false, 'blue', 'columns', PALETTE.join(','), true, theme)
+    );
+    // 'Alpha' is the mapped node label; it must still take a palette color.
+    expect(PALETTE).toContain(colors.get('Alpha'));
+  });
+
+  it('ignores thresholds — the option is "color by value MAPPINGS"', () => {
+    const colors = colorsWithMappings({
+      color: { mode: 'thresholds' },
+      thresholds: { mode: ThresholdsMode.Absolute, steps: [{ value: -Infinity, color: 'green' }] },
+    } as any);
+    expect(PALETTE).toContain(colors.get('A'));
+    expect(PALETTE).toContain(colors.get('B'));
+  });
+
+  it('changes nothing when the option is off, even with mappings present', () => {
+    const colors = colorByOrigin(
+      parse(
+        frameWithSrcConfig({ mappings: mapAToRed }),
+        { valueField: 'val' },
+        false,
+        'blue',
+        'columns',
+        PALETTE.join(','),
+        false,
+        theme
+      )
+    );
+    expect(PALETTE).toContain(colors.get('A'));
+    expect(PALETTE).toContain(colors.get('B'));
   });
 });
 
