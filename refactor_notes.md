@@ -240,10 +240,12 @@ Upgraded the plugin to current versions:
   `@grafana/eslint-config` at `^6.0.1` (self-contained, works with the legacy `.eslintrc`; v8 is
   flat-config/peer-dep only). The scaffolded `.config/` was left intact.
 
-**Verification caveat:** typecheck, lint, and the production build all pass on Grafana 13 / React
-19. Runtime behavior under Grafana 13 (rendering, theme, tooltip/menu, data-link navigation) was
-**not** validated here — it requires a live Grafana instance (`docker-compose.yaml`, now pinned to
-13.1.0) and is the main residual risk of the upgrade.
+**Verification:** typecheck, lint, unit tests and the production build all pass on Grafana 13 /
+React 19. Runtime behavior has since been validated against a **live Grafana 13** with the plugin
+loaded: the Playwright suite (`yarn e2e`) drives the real panel editor and asserts the diagram
+renders in both link modes, and rendering, theme, tooltip placement and value-mapping colors were
+confirmed by hand. The residual gaps are data-link navigation and the context menu, which no
+automated test covers yet.
 
 ## 8. Link coloring: value mappings + custom palette (features) — `dataParser.ts`, `module.ts`, `types.ts`
 
@@ -460,7 +462,13 @@ share a single live Grafana instance.
 
 **Note:** after changing any source file you must re-run `yarn build` before `yarn e2e` — the tests
 exercise the built `dist/` that Grafana loaded, not `src/`. `yarn dev` (watch build) plus a Grafana
-running with `app_mode = development` is the faster inner loop.
+running with `app_mode = development` is the faster inner loop. (`app_mode = development` also stops
+Grafana serving plugin assets with a one-hour browser cache, so a rebuild shows up on reload.)
+
+**e2e does not run in CI.** `.github/workflows/ci.yml` runs `typecheck`, `lint`, `test:ci` and
+`build` on the Node version in `.nvmrc`; the Playwright suite needs a live Grafana with the plugin
+installed, which CI does not provision. Adding a Grafana service container with `dist/` mounted as
+an unsigned plugin would close that gap.
 
 ---
 
